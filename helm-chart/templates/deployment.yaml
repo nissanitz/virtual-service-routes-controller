@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: virtual-service-routes-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: virtual-service-routes-controller
+  template:
+    metadata:
+      labels:
+        name: virtual-service-routes-controller
+    spec:
+      serviceAccountName: virtual-service-routes-controller
+      containers:
+        - image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          name: virtual-service-routes-controller
+          resources:
+            limits:
+              cpu: {{ .Values.cpu }}m
+              memory: {{ .Values.memory }}Mi
+            requests:
+              cpu: {{ .Values.cpu }}m
+              memory: {{ .Values.memory }}Mi
