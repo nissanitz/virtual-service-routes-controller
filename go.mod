@@ -3,7 +3,6 @@ module github.com/nisan270390/virtual-service-routes-controller
 go 1.12
 
 require (
-	github.com/cloudflare/cfssl v1.4.1
 	github.com/imdario/mergo v0.3.8 // indirect
 	github.com/sirupsen/logrus v1.3.0
 	golang.org/x/crypto v0.0.0-20191206172530-e9b2fee46413 // indirect

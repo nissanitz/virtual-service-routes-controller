@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -8,7 +9,10 @@ import (
 	"istio.io/api/networking/v1alpha3"
 	versionedclient "istio.io/client-go/pkg/clientset/versioned"
 	core_v1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // Handler interface contains the methods that are required
@@ -17,11 +21,13 @@ type Handler interface {
 	ObjectCreated(obj interface{})
 	ObjectDeleted(obj interface{})
 	ObjectUpdated(objOld, objNew interface{})
+	UpdateVirtualService(obj interface{})
 }
 
 // VirtualServiceUpdateHandler is a sample implementation of Handler
 type VirtualServiceUpdateHandler struct {
 	istioClient *versionedclient.Clientset
+	clientSet   kubernetes.Interface
 }
 
 // Init handles any handler initialization
@@ -33,77 +39,11 @@ func (vsu *VirtualServiceUpdateHandler) Init() error {
 // ObjectCreated is called when an object is created
 func (vsu *VirtualServiceUpdateHandler) ObjectCreated(obj interface{}) {
 	log.Info("VirtualServiceUpdateHandler.ObjectCreated")
-
-	var port int32
-
-	service := obj.(*core_v1.Service)
-	prefix := "/" + service.GetNamespace() + "/" + service.GetName()
-	host := service.GetName() + "." + service.GetNamespace() + ".svc.cluster.local"
-
-	// The label value uses the format <namespace>.<name>
-	labelValue := strings.Split(service.Labels[serviceLabel], ".")
-	namespace := labelValue[0]
-	vsName := labelValue[1]
-
-	// If the service port annotation exists then route to this port else use the first service port
-	if value, exists := service.Annotations[serviceAnnotation]; exists {
-		i, err := strconv.Atoi(value)
-		if err != nil {
-			log.Errorf("Failed to get port number from service annotation: %s", err)
-			return
-		}
-
-		port = int32(i)
-	} else {
-		port = service.Spec.Ports[0].Port
-	}
-
-	vs, err := vsu.istioClient.NetworkingV1alpha3().VirtualServices(namespace).Get(vsName, metav1.GetOptions{})
-	if err != nil {
-		log.Errorf("Failed to get %s virtual service in namespace %s: %s", vsName, namespace, err)
-	}
-
-	if exists, _ := isPrefixExist(vs.Spec.GetHttp(), prefix); !exists {
-		newRoute := newHTTPRoute(prefix, host, port)
-		httpRoutes := append(vs.Spec.GetHttp(), &newRoute)
-		vs.Spec.Http = httpRoutes
-
-		_, updateErr := vsu.istioClient.NetworkingV1alpha3().VirtualServices(namespace).Update(vs)
-
-		if updateErr != nil {
-			log.Errorf("Failed to update VirtualService in %s namespace: %s", namespace, err)
-		}
-	}
 }
 
 // ObjectDeleted is called when an object is deleted
 func (vsu *VirtualServiceUpdateHandler) ObjectDeleted(obj interface{}) {
 	log.Info("VirtualServiceUpdateHandler.ObjectDeleted")
-
-	service := obj.(*core_v1.Service)
-	prefix := "/" + service.GetNamespace() + "/" + service.GetName()
-
-	// The label value uses the format <namespace>.<name>
-	labelValue := strings.Split(service.Labels[serviceLabel], ".")
-	namespace := labelValue[0]
-	vsName := labelValue[1]
-
-	vs, err := vsu.istioClient.NetworkingV1alpha3().VirtualServices(namespace).Get(vsName, metav1.GetOptions{})
-	if err != nil {
-		log.Errorf("Failed to get %s virtual service in namespace %s: %s", vsName, namespace, err)
-	}
-
-	if exists, index := isPrefixExist(vs.Spec.GetHttp(), prefix); exists {
-		httpRoutes := vs.Spec.GetHttp()
-		httpRoutes = append(httpRoutes[:index], httpRoutes[index+1:]...)
-		vs.Spec.Http = httpRoutes
-
-		_, updateErr := vsu.istioClient.NetworkingV1alpha3().VirtualServices(namespace).Update(vs)
-
-		if updateErr != nil {
-			log.Errorf("Failed to update VirtualService in %s namespace: %s", namespace, err)
-		}
-	}
 }
 
 // ObjectUpdated is called when an object is updated.
@@ -113,15 +53,71 @@ func (vsu *VirtualServiceUpdateHandler) ObjectUpdated(objOld, objNew interface{}
 	log.Info("VirtualServiceUpdateHandler.ObjectUpdated")
 }
 
-// isPrefixExist is called for checking if prefix is existing in a given HTTPRoutes
-func isPrefixExist(httpRoutes []*v1alpha3.HTTPRoute, prefix string) (bool, int) {
-	for index, route := range httpRoutes {
-		if route.GetMatch()[0].GetUri().GetPrefix() == prefix {
-			return true, index
+// UpdateVirtualService is called when a service with specific label is changed
+func (vsu *VirtualServiceUpdateHandler) UpdateVirtualService(obj interface{}) {
+	log.Info("VirtualServiceUpdateHandler.UpdateVirtualService")
+
+	// The label value uses the format <namespace>.<name>
+	labelValue := obj.(*core_v1.Service).Labels[serviceLabel]
+	vsMetadata := strings.Split(labelValue, ".")
+	vsNamespace := vsMetadata[0]
+	vsName := vsMetadata[1]
+
+	serviceList, _ := getServices(labelValue, vsu.clientSet)
+	routes := make([]*v1alpha3.HTTPRoute, len(serviceList.Items))
+
+	for index, service := range serviceList.Items {
+
+		prefix := "/" + service.GetNamespace() + "/" + service.GetName()
+		host := service.GetName() + "." + service.GetNamespace() + ".svc.cluster.local"
+
+		port, err := getServicePort(service)
+		if err != nil {
+			log.Errorf("Failed to get port from service: %s", err)
+			return
 		}
+
+		newRoute := newHTTPRoute(prefix, host, port)
+
+		routes[index] = &newRoute
 	}
 
-	return false, -1
+	vs, err := vsu.istioClient.NetworkingV1alpha3().VirtualServices(vsNamespace).Get(vsName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("Failed to get %s virtual service in namespace %s: %s", vsName, vsNamespace, err)
+	}
+
+	vs.Spec.Http = routes
+
+	_, updateErr := vsu.istioClient.NetworkingV1alpha3().VirtualServices(vsNamespace).Update(vs)
+
+	if updateErr != nil {
+		log.Errorf("Failed to update %s VirtualService in %s namespace: %s", vsName, vsNamespace, err)
+	}
+}
+
+func getServices(serviceLabelValue string, client kubernetes.Interface) (*v1.ServiceList, error) {
+	labelSelector := fmt.Sprintf("%s=%s", serviceLabel, serviceLabelValue)
+
+	options := meta_v1.ListOptions{
+		LabelSelector: labelSelector,
+	}
+
+	return client.CoreV1().Services(meta_v1.NamespaceAll).List(options)
+}
+
+func getServicePort(service v1.Service) (int32, error) {
+	// If the service port annotation exists then route to this port else use the first service port
+	if value, exists := service.Annotations[serviceAnnotation]; exists {
+		portInt, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, err
+		}
+
+		return int32(portInt), nil
+	}
+
+	return service.Spec.Ports[0].Port, nil
 }
 
 func newHTTPRoute(prefix, host string, port int32) v1alpha3.HTTPRoute {
@@ -134,6 +130,17 @@ func newHTTPRoute(prefix, host string, port int32) v1alpha3.HTTPRoute {
 					},
 				},
 			},
+		},
+		Headers: &v1alpha3.Headers{
+			Response: &v1alpha3.Headers_HeaderOperations{
+				Remove: []string{
+					"x-envoy-upstream-healthchecked-cluster",
+					"x-envoy-upstream-service-time",
+				},
+			},
+		},
+		Rewrite: &v1alpha3.HTTPRewrite{
+			Uri: "/",
 		},
 		Route: []*v1alpha3.HTTPRouteDestination{
 			{

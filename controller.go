@@ -8,6 +8,7 @@ import (
 	versionedclient "istio.io/client-go/pkg/clientset/versioned"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 )
@@ -28,6 +29,7 @@ func NewController(
 	queue workqueue.RateLimitingInterface,
 	informer cache.SharedIndexInformer,
 	deletedIndexer cache.Indexer,
+	client kubernetes.Interface,
 	istioClient *versionedclient.Clientset) *Controller {
 
 	return &Controller{
@@ -36,6 +38,7 @@ func NewController(
 		queue:          queue,
 		deletedIndexer: deletedIndexer,
 		handler: &VirtualServiceUpdateHandler{
+			clientSet:   client,
 			istioClient: istioClient,
 		},
 	}
@@ -138,14 +141,16 @@ func (c *Controller) processNextItem() bool {
 	if !exists {
 		c.logger.Infof("Controller.processNextItem: object deleted detected: %s", keyRaw)
 		if item, exists, err = c.deletedIndexer.GetByKey(keyRaw); err == nil && exists {
-			c.handler.ObjectDeleted(item)
+			// c.handler.ObjectDeleted(item)
+			c.handler.UpdateVirtualService(item)
 
 			c.deletedIndexer.Delete(key)
 		}
 		c.queue.Forget(key)
 	} else {
 		c.logger.Infof("Controller.processNextItem: object created detected: %s", keyRaw)
-		c.handler.ObjectCreated(item)
+		// c.handler.ObjectCreated(item)
+		c.handler.UpdateVirtualService(item)
 		c.queue.Forget(key)
 	}
 

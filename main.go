@@ -131,7 +131,7 @@ func main() {
 	// construct the Controller object which has all of the necessary components to
 	// handle logging, connections, informing (listing and watching) and deleted indexer, the queue,
 	// and the handler
-	controller := NewController(queue, informer, deletedIndexer, istioClient)
+	controller := NewController(queue, informer, deletedIndexer, client, istioClient)
 
 	// use a channel to synchronize the finalization for a graceful shutdown
 	stopCh := make(chan struct{})
